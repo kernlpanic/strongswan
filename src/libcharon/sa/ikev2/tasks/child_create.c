@@ -84,14 +84,24 @@ struct private_child_create_t {
 	proposal_t *proposal;
 
 	/**
-	 * traffic selectors for initiators side
+	 * traffic selectors for initiator side
 	 */
 	linked_list_t *tsi;
 
 	/**
-	 * traffic selectors for responders side
+	 * traffic selectors for responder side
 	 */
 	linked_list_t *tsr;
+
+	/**
+	 * labels for initiator side
+	 */
+	linked_list_t *labels_i;
+
+	/**
+	 * labels for responder side
+	 */
+	linked_list_t *labels_r;
 
 	/**
 	 * source of triggering packet
@@ -210,6 +220,7 @@ static void schedule_delayed_retry(private_child_create_t *this)
 	task->use_reqid(task, this->child.reqid);
 	task->use_marks(task, this->child.mark_in, this->child.mark_out);
 	task->use_if_ids(task, this->child.if_id_in, this->child.if_id_out);
+	task->use_label(task, this->child.label);
 
 	DBG1(DBG_IKE, "creating CHILD_SA failed, trying again in %d seconds",
 		 retry);
@@ -891,9 +902,11 @@ static bool build_payloads(private_child_create_t *this, message_t *message)
 	}
 
 	/* add TSi/TSr payloads */
-	ts_payload = ts_payload_create_from_traffic_selectors(TRUE, this->tsi, NULL);
+	ts_payload = ts_payload_create_from_traffic_selectors(TRUE, this->tsi,
+														  this->child.label);
 	message->add_payload(message, (payload_t*)ts_payload);
-	ts_payload = ts_payload_create_from_traffic_selectors(FALSE, this->tsr, NULL);
+	ts_payload = ts_payload_create_from_traffic_selectors(FALSE, this->tsr,
+														  this->child.label);
 	message->add_payload(message, (payload_t*)ts_payload);
 
 	/* add a notify if we are not in tunnel mode */
@@ -1039,10 +1052,12 @@ static void process_payloads(private_child_create_t *this, message_t *message)
 			case PLV2_TS_INITIATOR:
 				ts_payload = (ts_payload_t*)payload;
 				this->tsi = ts_payload->get_traffic_selectors(ts_payload);
+				this->labels_i = ts_payload->get_sec_labels(ts_payload);
 				break;
 			case PLV2_TS_RESPONDER:
 				ts_payload = (ts_payload_t*)payload;
 				this->tsr = ts_payload->get_traffic_selectors(ts_payload);
+				this->labels_r = ts_payload->get_sec_labels(ts_payload);
 				break;
 			case PLV2_NOTIFY:
 				handle_notify(this, (notify_payload_t*)payload);
@@ -1231,6 +1246,21 @@ METHOD(task_t, build_i, status_t,
 		this->tsr->insert_first(this->tsr,
 								this->packet_tsr->clone(this->packet_tsr));
 	}
+
+	if (!this->child.label)
+	{
+		this->child.label = this->config->get_label(this->config);
+		if (this->child.label)
+		{
+			this->child.label = this->child.label->clone(this->child.label);
+		}
+	}
+	if (this->child.label)
+	{
+		DBG2(DBG_CFG, "proposing security label '%s'",
+			 this->child.label->get_string(this->child.label));
+	}
+
 	this->proposals = this->config->get_proposals(this->config,
 												  this->dh_group == MODP_NONE);
 	this->mode = this->config->get_mode(this->config);
@@ -1414,8 +1444,8 @@ static child_cfg_t* select_child_cfg(private_child_create_t *this)
 		listr = get_dynamic_hosts(this->ike_sa, TRUE);
 		listi = get_dynamic_hosts(this->ike_sa, FALSE);
 		child_cfg = peer_cfg->select_child_cfg(peer_cfg,
-											tsr ?: this->tsr, tsi ?: this->tsi,
-											listr, listi, NULL, NULL);
+									tsr ?: this->tsr, tsi ?: this->tsi,
+									listr, listi, this->labels_r, this->labels_i);
 		if ((tsi || tsr) && child_cfg &&
 			child_cfg->get_mode(child_cfg) != MODE_TRANSPORT)
 		{
@@ -1427,8 +1457,8 @@ static child_cfg_t* select_child_cfg(private_child_create_t *this)
 		{
 			/* no match for the substituted NAT selectors, try it without */
 			child_cfg = peer_cfg->select_child_cfg(peer_cfg,
-											this->tsr, this->tsi,
-											listr, listi, NULL, NULL);
+									this->tsr, this->tsi,
+									listr, listi, this->labels_r, this->labels_i);
 		}
 		listr->destroy(listr);
 		listi->destroy(listi);
@@ -1468,6 +1498,49 @@ static status_t handle_childless(private_child_create_t *this)
 		return INVALID_STATE;
 	}
 	return NOT_SUPPORTED;
+}
+
+/**
+ * Select a security label.
+ *
+ * We already know that the proposed labels match the selected config, just make
+ * sure that the proposed/returned labels are the same.
+ */
+static bool select_label(private_child_create_t *this)
+{
+	sec_label_t *li, *lr;
+
+	if (!this->config->select_label(this->config, this->labels_i, FALSE, &li, NULL) ||
+		!this->config->select_label(this->config, this->labels_r, FALSE, &lr, NULL))
+	{	/* sanity check */
+		return FALSE;
+	}
+
+	if (li)
+	{
+		if (!li->equals(li, lr))
+		{
+			DBG1(DBG_CHD, "security labels in TSi and TSr don't match");
+			return FALSE;
+		}
+		else if (!this->child.label)
+		{
+			this->child.label = li->clone(li);
+		}
+		else if (!this->child.label->equals(this->child.label, li))
+		{
+			DBG1(DBG_CHD, "returned security label '%s' doesn't match proposed "
+				 "'%s'", li->get_string(li),
+				 this->child.label->get_string(this->child.label));
+			return FALSE;
+		}
+	}
+	if (this->child.label)
+	{
+		DBG1(DBG_CFG, "selected security label: %s",
+			 this->child.label->get_string(this->child.label));
+	}
+	return TRUE;
 }
 
 METHOD(task_t, build_r, status_t,
@@ -1576,6 +1649,13 @@ METHOD(task_t, build_r, status_t,
 		}
 	}
 	enumerator->destroy(enumerator);
+
+	if (!select_label(this))
+	{
+		message->add_notify(message, FALSE, TS_UNACCEPTABLE, chunk_empty);
+		handle_child_sa_failure(this, message);
+		return SUCCESS;
+	}
 
 	this->child.if_id_in_def = this->ike_sa->get_if_id(this->ike_sa, TRUE);
 	this->child.if_id_out_def = this->ike_sa->get_if_id(this->ike_sa, FALSE);
@@ -1834,6 +1914,12 @@ METHOD(task_t, process_i, status_t,
 		return delete_failed_sa(this);
 	}
 
+	if (!select_label(this))
+	{
+		handle_child_sa_failure(this, message);
+		return delete_failed_sa(this);
+	}
+
 	if (select_and_install(this, no_dh, ike_auth) == SUCCESS)
 	{
 		if (!this->rekey)
@@ -1867,6 +1953,13 @@ METHOD(child_create_t, use_if_ids, void,
 {
 	this->child.if_id_in = in;
 	this->child.if_id_out = out;
+}
+
+METHOD(child_create_t, use_label, void,
+	private_child_create_t *this, sec_label_t *label)
+{
+	DESTROY_IF(this->child.label);
+	this->child.label = label ? label->clone(label) : NULL;
 }
 
 METHOD(child_create_t, use_dh_group, void,
@@ -1921,6 +2014,14 @@ METHOD(task_t, migrate, void,
 	{
 		this->tsi->destroy_offset(this->tsi, offsetof(traffic_selector_t, destroy));
 	}
+	if (this->labels_i)
+	{
+		this->labels_i->destroy_offset(this->labels_i, offsetof(sec_label_t, destroy));
+	}
+	if (this->labels_r)
+	{
+		this->labels_r->destroy_offset(this->labels_r, offsetof(sec_label_t, destroy));
+	}
 	DESTROY_IF(this->child_sa);
 	DESTROY_IF(this->proposal);
 	DESTROY_IF(this->nonceg);
@@ -1963,6 +2064,14 @@ METHOD(task_t, destroy, void,
 	{
 		this->tsi->destroy_offset(this->tsi, offsetof(traffic_selector_t, destroy));
 	}
+	if (this->labels_i)
+	{
+		this->labels_i->destroy_offset(this->labels_i, offsetof(sec_label_t, destroy));
+	}
+	if (this->labels_r)
+	{
+		this->labels_r->destroy_offset(this->labels_r, offsetof(sec_label_t, destroy));
+	}
 	if (!this->established)
 	{
 		DESTROY_IF(this->child_sa);
@@ -1977,6 +2086,7 @@ METHOD(task_t, destroy, void,
 	}
 	DESTROY_IF(this->config);
 	DESTROY_IF(this->nonceg);
+	DESTROY_IF(this->child.label);
 	free(this);
 }
 
@@ -1997,6 +2107,7 @@ child_create_t *child_create_create(ike_sa_t *ike_sa,
 			.use_reqid = _use_reqid,
 			.use_marks = _use_marks,
 			.use_if_ids = _use_if_ids,
+			.use_label = _use_label,
 			.use_dh_group = _use_dh_group,
 			.task = {
 				.get_type = _get_type,
