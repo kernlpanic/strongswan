@@ -106,6 +106,8 @@ typedef struct {
 	child_sa_t *child_sa;
 	/** TRUE in case of wildcard Transport Mode SA */
 	bool wildcard;
+	/** TRUE for CHILD_SAs that were registered later */
+	bool registered;
 } entry_t;
 
 /**
@@ -127,7 +129,10 @@ typedef struct {
  */
 static void destroy_entry(entry_t *this)
 {
-	this->child_sa->destroy(this->child_sa);
+	if (!this->registered)
+	{
+		this->child_sa->destroy(this->child_sa);
+	}
 	this->peer_cfg->destroy(this->peer_cfg);
 	free(this->name);
 	free(this);
@@ -258,13 +263,15 @@ METHOD(trap_manager_t, install, bool,
 	enumerator = this->traps->create_enumerator(this->traps);
 	while (enumerator->enumerate(enumerator, &entry))
 	{
-		if (streq(entry->name, child->get_name(child)) &&
+		if (!entry->registered &&
+			streq(entry->name, child->get_name(child)) &&
 			streq(entry->peer_cfg->get_name(entry->peer_cfg),
 				  peer->get_name(peer)))
 		{
 			found = entry;
 			if (entry->child_sa)
-			{	/* replace it with an updated version, if already installed */
+			{	/* replace it with an updated version, if already installed
+				 * or registered */
 				this->traps->remove_at(this->traps, enumerator);
 			}
 			break;
@@ -370,8 +377,60 @@ METHOD(trap_manager_t, uninstall, bool,
 	enumerator = this->traps->create_enumerator(this->traps);
 	while (enumerator->enumerate(enumerator, &entry))
 	{
-		if (streq(entry->name, child) &&
-		   (!peer || streq(peer, entry->peer_cfg->get_name(entry->peer_cfg))))
+		if (!entry->registered &&
+			streq(entry->name, child) &&
+		    (!peer || streq(peer, entry->peer_cfg->get_name(entry->peer_cfg))))
+		{
+			this->traps->remove_at(this->traps, enumerator);
+			found = entry;
+			break;
+		}
+	}
+	enumerator->destroy(enumerator);
+	this->lock->unlock(this->lock);
+
+	if (!found)
+	{
+		return FALSE;
+	}
+	destroy_entry(found);
+	return TRUE;
+}
+
+METHOD(trap_manager_t, add_child, bool,
+	private_trap_manager_t *this, peer_cfg_t *peer, child_sa_t *child)
+{
+	entry_t *entry;
+
+	this->lock->write_lock(this->lock);
+	if (this->installing == INSTALL_DISABLED)
+	{	/* flush() has been called */
+		this->lock->unlock(this->lock);
+		return FALSE;
+	}
+
+	INIT(entry,
+		.name = strdup(child->get_name(child)),
+		.peer_cfg = peer->get_ref(peer),
+		.child_sa = child,
+		.registered = TRUE,
+	);
+	this->traps->insert_first(this->traps, entry);
+	this->lock->unlock(this->lock);
+	return TRUE;
+}
+
+METHOD(trap_manager_t, remove_child, bool,
+	private_trap_manager_t *this, child_sa_t *child)
+{
+	enumerator_t *enumerator;
+	entry_t *entry, *found = NULL;
+
+	this->lock->write_lock(this->lock);
+	enumerator = this->traps->create_enumerator(this->traps);
+	while (enumerator->enumerate(enumerator, &entry))
+	{
+		if (entry->registered && entry->child_sa == child)
 		{
 			this->traps->remove_at(this->traps, enumerator);
 			found = entry;
@@ -400,8 +459,9 @@ CALLBACK(trap_filter, bool,
 
 	while (orig->enumerate(orig, &entry))
 	{
-		if (!entry->child_sa)
-		{	/* skip entries that are currently being installed */
+		if (!entry->child_sa || entry->registered)
+		{	/* skip entries that are currently being installed or were not
+			 * installed as trap policy */
 			continue;
 		}
 		if (peer_cfg)
@@ -689,6 +749,8 @@ trap_manager_t *trap_manager_create(void)
 		.public = {
 			.install = _install,
 			.uninstall = _uninstall,
+			.add_child = _add_child,
+			.remove_child = _remove_child,
 			.create_enumerator = _create_enumerator,
 			.acquire = _acquire,
 			.flush = _flush,

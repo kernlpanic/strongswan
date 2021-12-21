@@ -25,6 +25,7 @@
 #include <library.h>
 #include <collections/enumerator.h>
 #include <config/peer_cfg.h>
+#include <sa/child_sa.h>
 
 typedef struct trap_manager_t trap_manager_t;
 
@@ -55,7 +56,30 @@ struct trap_manager_t {
 	bool (*uninstall)(trap_manager_t *this, char *peer, char *child);
 
 	/**
-	 * Create an enumerator over all installed traps.
+	 * Register a CHILD_SA for which acquires might get triggered.
+	 *
+	 * This could be used for CHILD_SAs whose policies might trigger acquires
+	 * but for which it is not possible to install trap policies (e.g. because
+	 * they are for roadwarriors but due to security labels acquires might get
+	 * triggered).
+	 *
+	 * @param peer		peer configuration to register
+	 * @param child 	CHILD_SA to register
+	 * @return			TRUE if successfully registered
+	 */
+	bool (*add_child)(trap_manager_t *this, peer_cfg_t *peer, child_sa_t *child);
+
+	/**
+	 * Remove a previously registered CHILD_SA.
+	 *
+	 * @param child 	CHILD_SA to remove
+	 * @return			TRUE if successfully removed
+	 */
+	bool (*remove_child)(trap_manager_t *this, child_sa_t *child);
+
+	/**
+	 * Create an enumerator over all installed traps (does not include
+	 * registered CHILD_SAs).
 	 *
 	 * @return			enumerator over (peer_cfg_t, child_sa_t)
 	 */
