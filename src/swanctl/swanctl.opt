@@ -1011,6 +1011,18 @@ connections.<conn>.children.<child>.if_id_out = 0
 
 	The daemon will not install routes for CHILD_SAs that have this option set.
 
+connections.<conn>.children.<child>.label
+	Optional security label (e.g. SELinux context).
+
+	Optional security label. For SELinux this is usually a generic context (e.g.
+	_system_u:object_r:ipsec_spd_t:s0_) for which flows, whose context match it
+	via association:polmatch, will trigger an acquire if no SA exists yet for a
+	flow's specific context.  So this should generally be combined with _trap_
+	in **start_action**.
+
+	Labels proposed by peers will be accepted if they match the configured label
+	via association:polmatch.
+
 connections.<conn>.children.<child>.tfc_padding = 0
 	Traffic Flow Confidentiality padding.
 
