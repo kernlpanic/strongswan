@@ -1744,6 +1744,11 @@ METHOD(child_sa_t, destroy, void,
 
 	set_state(this, CHILD_DESTROYING);
 
+	if (this->label)
+	{
+		charon->traps->remove_child(charon->traps, &this->public);
+	}
+
 	if (!this->config->has_option(this->config, OPT_NO_POLICIES))
 	{
 		ipsec_sa_cfg_t my_sa, other_sa;

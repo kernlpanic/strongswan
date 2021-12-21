@@ -803,6 +803,14 @@ static status_t select_and_install(private_child_create_t *this,
 	}
 	else
 	{
+		if (this->child_sa->get_label(this->child_sa))
+		{
+			/* register this CHILD_SA with the trap manager in case acquires
+			 * are triggered for the installed policies */
+			charon->traps->add_child(charon->traps,
+									 this->ike_sa->get_peer_cfg(this->ike_sa),
+									 this->child_sa);
+		}
 		status = this->child_sa->install_policies(this->child_sa);
 
 		if (status != SUCCESS)
